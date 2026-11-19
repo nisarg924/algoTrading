@@ -7,7 +7,8 @@ const {
   search,
   getWatchlist,
   addToWatchlist,
-  removeFromWatchlist
+  removeFromWatchlist,
+  clearCache
 } = require('../controllers/marketController');
 
 router.get('/analyze', getAssetAnalysis);
@@ -17,6 +18,8 @@ router.get('/search', search);
 router.get('/watchlist', getWatchlist);
 router.post('/watchlist', addToWatchlist);
 router.delete('/watchlist/:symbol', removeFromWatchlist);
+router.get('/cache/clear', clearCache);
+router.post('/cache/clear', clearCache);
 
 module.exports = router;
 

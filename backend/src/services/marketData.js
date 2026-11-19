@@ -261,7 +261,16 @@ async function fetchRawMarketData(symbol) {
   const cached = cache.get(cacheKey);
 
   if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
-    return cached.data;
+    const p = cached.data?.regularMarketPrice || cached.data?.bars?.[cached.data.bars.length - 1]?.close || 0;
+    const isCorrupted =
+      ((normalized === '^NSEI' || normalized.includes('NSEI')) && p < 18000) ||
+      ((normalized === '^BSESN' || normalized.includes('BSESN')) && p < 60000) ||
+      ((normalized === '^NSEBANK' || normalized.includes('NSEBANK')) && p < 35000);
+
+    if (!isCorrupted) {
+      return cached.data;
+    }
+    cache.delete(cacheKey);
   }
 
   let payload = null;
@@ -338,20 +347,43 @@ async function fetchRawMarketData(symbol) {
  * Resilient Synthetic Fallback (Only used if cloud network is completely severed)
  */
 function generateSyntheticFallback(symbol) {
-  let basePrice = 25290;
+  let basePrice = 25514;
   let name = 'NIFTY 50';
-  if (symbol === '^BSESN') {
-    basePrice = 82100;
+
+  const s = (symbol || '').toUpperCase();
+  if (s === '^NSEI' || s.includes('NSEI') || (s.includes('NIFTY') && !s.includes('BANK') && !s.includes('FIN'))) {
+    basePrice = 25514;
+    name = 'NIFTY 50';
+  } else if (s === '^BSESN' || s.includes('BSESN') || s.includes('SENSEX')) {
+    basePrice = 86000;
     name = 'BSE SENSEX';
-  } else if (symbol === '^NSEBANK') {
-    basePrice = 52400;
+  } else if (s === '^NSEBANK' || s.includes('NSEBANK') || s.includes('BANKNIFTY')) {
+    basePrice = 63000;
     name = 'BANK NIFTY';
-  } else if (symbol.includes('RELIANCE')) {
-    basePrice = 1375;
+  } else if (s.includes('FINNIFTY') || s.includes('FIN_SERVICE')) {
+    basePrice = 25000;
+    name = 'NIFTY FINANCIAL SERVICES';
+  } else if (s.includes('RELIANCE')) {
+    basePrice = 1516;
     name = 'RELIANCE INDUSTRIES';
-  } else if (symbol.includes('TCS')) {
+  } else if (s.includes('TCS')) {
     basePrice = 2342;
     name = 'TATA CONSULTANCY SERVICES';
+  } else if (s.includes('HDFCBANK')) {
+    basePrice = 1580;
+    name = 'HDFC BANK';
+  } else if (s.includes('INFY')) {
+    basePrice = 1850;
+    name = 'INFOSYS';
+  } else if (s.includes('TATAMOTORS') || s.includes('TMPV')) {
+    basePrice = 780;
+    name = 'TATA MOTORS';
+  } else if (s.includes('ICICIBANK')) {
+    basePrice = 1250;
+    name = 'ICICI BANK';
+  } else if (s.includes('SBIN')) {
+    basePrice = 810;
+    name = 'STATE BANK OF INDIA';
   } else {
     name = symbol;
     basePrice = 1500;
@@ -594,10 +626,16 @@ async function getAssetAccuracyReport(symbol, days = 30) {
   };
 }
 
+function clearMarketCache() {
+  cache.clear();
+  return { success: true, message: 'Market memory cache cleared.' };
+}
+
 module.exports = {
   analyzeAsset,
   searchSymbols,
   getIndicesOverview,
   normalizeSymbol,
-  getAssetAccuracyReport
+  getAssetAccuracyReport,
+  clearMarketCache
 };

@@ -1,5 +1,13 @@
-const { analyzeAsset, searchSymbols, getIndicesOverview, getAssetAccuracyReport } = require('../services/marketData');
+const { analyzeAsset, searchSymbols, getIndicesOverview, getAssetAccuracyReport, clearMarketCache } = require('../services/marketData');
 const Watchlist = require('../models/Watchlist');
+
+/**
+ * POST or GET /api/market/cache/clear
+ */
+function clearCache(req, res) {
+  const result = clearMarketCache();
+  res.json(result);
+}
 
 /**
  * GET /api/market/accuracy-report?symbol=^NSEI&days=30
@@ -103,6 +111,7 @@ module.exports = {
   search,
   getWatchlist,
   addToWatchlist,
-  removeFromWatchlist
+  removeFromWatchlist,
+  clearCache
 };
 
