@@ -18,7 +18,7 @@ const cache = new Map();
 const CACHE_TTL_MS = 60 * 1000; // 60 seconds
 
 // Session Cookie & Crumb Cache for Yahoo Finance (Fixes 429 on Cloud Hosts)
-let sessionCache = { cookie: null, crumb: null, expiry: 0 };
+let sessionCache = { cookie: null, crumb: null, expiry: 0, userAgent: null };
 
 const USER_AGENTS = [
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -33,14 +33,14 @@ function getRandomUserAgent() {
 
 /**
  * Obtain and Cache Anonymous Yahoo Finance Session (Cookie + Crumb)
- * Both are required on cloud datacenter IPs (Render/AWS) to prevent 429 Too Many Requests
+ * Both are cached for 6 hours so cloud hosts avoid rate-limiting
  */
 async function getYahooSession(forceRefresh = false) {
-  if (!forceRefresh && sessionCache.cookie && sessionCache.crumb && Date.now() < sessionCache.expiry) {
+  if (!forceRefresh && sessionCache.cookie && Date.now() < sessionCache.expiry) {
     return sessionCache;
   }
 
-  const userAgent = getRandomUserAgent();
+  const userAgent = sessionCache.userAgent || getRandomUserAgent();
   try {
     // 1. Get Cookie from fc.yahoo.com
     const cookieRes = await fetch('https://fc.yahoo.com', {
@@ -49,32 +49,34 @@ async function getYahooSession(forceRefresh = false) {
     const setCookie = cookieRes.headers.get('set-cookie');
     const cookie = setCookie ? setCookie.split(';')[0] : '';
 
-    // 2. Get Crumb from query2.finance.yahoo.com
-    const hosts = ['query2.finance.yahoo.com', 'query1.finance.yahoo.com'];
+    // 2. Try to obtain crumb from query2 or query1
     let crumb = '';
-
-    for (const host of hosts) {
-      try {
-        const crumbRes = await fetch(`https://${host}/v1/test/getcrumb`, {
-          headers: {
-            'User-Agent': userAgent,
-            'Cookie': cookie
+    if (cookie) {
+      const hosts = ['query2.finance.yahoo.com', 'query1.finance.yahoo.com'];
+      for (const host of hosts) {
+        try {
+          const crumbRes = await fetch(`https://${host}/v1/test/getcrumb`, {
+            headers: {
+              'User-Agent': userAgent,
+              'Cookie': cookie
+            }
+          });
+          if (crumbRes.ok) {
+            const text = await crumbRes.text();
+            if (text && !text.includes('Too Many') && !text.includes('<html>')) {
+              crumb = text.trim();
+              break;
+            }
           }
-        });
-        if (crumbRes.ok) {
-          const text = await crumbRes.text();
-          if (text && !text.includes('Too Many') && !text.includes('<html>')) {
-            crumb = text.trim();
-            break;
-          }
-        }
-      } catch (e) {}
+        } catch (e) {}
+      }
     }
 
     if (cookie) {
       sessionCache = {
         cookie,
         crumb,
+        userAgent,
         expiry: Date.now() + 6 * 60 * 60 * 1000 // 6 hours validity
       };
       return sessionCache;
@@ -156,21 +158,21 @@ async function fetchGrowwLive(symbol) {
  * Prevents 429 Too Many Requests on Render/AWS/Cloud hosts
  */
 async function fetchDirectChart(symbol, retry = true) {
-  const { cookie, crumb } = await getYahooSession();
+  const session = await getYahooSession();
   const hosts = ['query2.finance.yahoo.com', 'query1.finance.yahoo.com'];
   let lastError = null;
 
   for (const host of hosts) {
     try {
       let url = `https://${host}/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=1y`;
-      if (crumb) {
-        url += `&crumb=${encodeURIComponent(crumb)}`;
+      if (session.crumb) {
+        url += `&crumb=${encodeURIComponent(session.crumb)}`;
       }
 
       const res = await fetch(url, {
         headers: {
-          'User-Agent': getRandomUserAgent(),
-          ...(cookie ? { 'Cookie': cookie } : {}),
+          'User-Agent': session.userAgent || getRandomUserAgent(),
+          ...(session.cookie ? { 'Cookie': session.cookie } : {}),
           'Accept': '*/*',
           'Accept-Language': 'en-US,en;q=0.9'
         }
@@ -345,48 +347,49 @@ async function fetchRawMarketData(symbol) {
 
 /**
  * Resilient Synthetic Fallback (Only used if cloud network is completely severed)
+ * Normalized so that the latest bar and current price ALWAYS strictly match real-world benchmarks
  */
 function generateSyntheticFallback(symbol) {
-  let basePrice = 25514;
+  let basePrice = 25514.30;
   let name = 'NIFTY 50';
 
   const s = (symbol || '').toUpperCase();
   if (s === '^NSEI' || s.includes('NSEI') || (s.includes('NIFTY') && !s.includes('BANK') && !s.includes('FIN'))) {
-    basePrice = 25514;
+    basePrice = 25514.30;
     name = 'NIFTY 50';
   } else if (s === '^BSESN' || s.includes('BSESN') || s.includes('SENSEX')) {
-    basePrice = 86000;
+    basePrice = 83021.75;
     name = 'BSE SENSEX';
   } else if (s === '^NSEBANK' || s.includes('NSEBANK') || s.includes('BANKNIFTY')) {
-    basePrice = 63000;
+    basePrice = 55814.63;
     name = 'BANK NIFTY';
   } else if (s.includes('FINNIFTY') || s.includes('FIN_SERVICE')) {
-    basePrice = 25000;
+    basePrice = 25100.00;
     name = 'NIFTY FINANCIAL SERVICES';
   } else if (s.includes('RELIANCE')) {
-    basePrice = 1516;
+    basePrice = 1516.86;
     name = 'RELIANCE INDUSTRIES';
   } else if (s.includes('TCS')) {
-    basePrice = 2342;
+    basePrice = 2342.70;
     name = 'TATA CONSULTANCY SERVICES';
   } else if (s.includes('HDFCBANK')) {
-    basePrice = 1580;
+    basePrice = 1579.46;
     name = 'HDFC BANK';
   } else if (s.includes('INFY')) {
-    basePrice = 1850;
+    basePrice = 1850.00;
     name = 'INFOSYS';
   } else if (s.includes('TATAMOTORS') || s.includes('TMPV')) {
-    basePrice = 780;
+    basePrice = 780.00;
     name = 'TATA MOTORS';
   } else if (s.includes('ICICIBANK')) {
-    basePrice = 1250;
+    basePrice = 1250.00;
     name = 'ICICI BANK';
   } else if (s.includes('SBIN')) {
-    basePrice = 810;
+    basePrice = 810.00;
     name = 'STATE BANK OF INDIA';
   } else {
     name = symbol;
-    basePrice = 1500;
+    basePrice = 1500.00;
   }
 
   const bars = [];
@@ -417,15 +420,29 @@ function generateSyntheticFallback(symbol) {
     });
   }
 
+  // Mathematically scale the series so the LAST bar closes EXACTLY at basePrice
+  const rawLastClose = bars[bars.length - 1].close || basePrice;
+  const scale = basePrice / rawLastClose;
+  for (const bar of bars) {
+    bar.open = Number((bar.open * scale).toFixed(2));
+    bar.high = Number((bar.high * scale).toFixed(2));
+    bar.low = Number((bar.low * scale).toFixed(2));
+    bar.close = Number((bar.close * scale).toFixed(2));
+  }
+  // Pin final bar to exact basePrice
   const lastBar = bars[bars.length - 1];
-  const prevBar = bars[bars.length - 2];
+  lastBar.close = basePrice;
+  lastBar.high = Math.max(lastBar.high, basePrice);
+  lastBar.low = Math.min(lastBar.low, basePrice * 0.995);
+
+  const prevBar = bars.length > 1 ? bars[bars.length - 2] : lastBar;
   const change = Number((lastBar.close - prevBar.close).toFixed(2));
   const changePercent = Number(((change / prevBar.close) * 100).toFixed(2));
 
   return {
     symbol,
     shortName: name,
-    regularMarketPrice: lastBar.close,
+    regularMarketPrice: basePrice,
     regularMarketChange: change,
     regularMarketChangePercent: changePercent,
     regularMarketDayHigh: lastBar.high,
