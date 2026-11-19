@@ -11,14 +11,14 @@ const {
 const { detectCandlestickPatterns } = require('./candlestickPatterns');
 const { generateMarketPrediction } = require('./predictionEngine');
 const { generateAccuracyReport } = require('./accuracyReport');
+const { getCachedMarketData, setCachedMarketData } = require('../models/MarketCache');
 
 // In-memory cache for ultra-fast response and rate-limiting resilience
 const cache = new Map();
-const CACHE_TTL_MS = 30 * 1000; // 30 seconds
+const CACHE_TTL_MS = 60 * 1000; // 60 seconds
 
-// Session Cookie Cache for Yahoo Finance (Bypasses 429 Too Many Requests on Cloud Hosts)
-let cachedCookie = null;
-let cookieExpiry = 0;
+// Session Cookie & Crumb Cache for Yahoo Finance (Fixes 429 on Cloud Hosts)
+let sessionCache = { cookie: null, crumb: null, expiry: 0 };
 
 const USER_AGENTS = [
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -32,29 +32,58 @@ function getRandomUserAgent() {
 }
 
 /**
- * Obtain and Cache Anonymous Yahoo Finance Session Cookie
+ * Obtain and Cache Anonymous Yahoo Finance Session (Cookie + Crumb)
+ * Both are required on cloud datacenter IPs (Render/AWS) to prevent 429 Too Many Requests
  */
-async function getYahooCookie(forceRefresh = false) {
-  if (!forceRefresh && cachedCookie && Date.now() < cookieExpiry) {
-    return cachedCookie;
+async function getYahooSession(forceRefresh = false) {
+  if (!forceRefresh && sessionCache.cookie && sessionCache.crumb && Date.now() < sessionCache.expiry) {
+    return sessionCache;
   }
 
+  const userAgent = getRandomUserAgent();
   try {
-    const res = await fetch('https://fc.yahoo.com', {
-      headers: {
-        'User-Agent': getRandomUserAgent()
-      }
+    // 1. Get Cookie from fc.yahoo.com
+    const cookieRes = await fetch('https://fc.yahoo.com', {
+      headers: { 'User-Agent': userAgent }
     });
-    const setCookie = res.headers.get('set-cookie');
-    if (setCookie) {
-      cachedCookie = setCookie.split(';')[0];
-      cookieExpiry = Date.now() + 6 * 60 * 60 * 1000; // 6 hours validity
-      return cachedCookie;
+    const setCookie = cookieRes.headers.get('set-cookie');
+    const cookie = setCookie ? setCookie.split(';')[0] : '';
+
+    // 2. Get Crumb from query2.finance.yahoo.com
+    const hosts = ['query2.finance.yahoo.com', 'query1.finance.yahoo.com'];
+    let crumb = '';
+
+    for (const host of hosts) {
+      try {
+        const crumbRes = await fetch(`https://${host}/v1/test/getcrumb`, {
+          headers: {
+            'User-Agent': userAgent,
+            'Cookie': cookie
+          }
+        });
+        if (crumbRes.ok) {
+          const text = await crumbRes.text();
+          if (text && !text.includes('Too Many') && !text.includes('<html>')) {
+            crumb = text.trim();
+            break;
+          }
+        }
+      } catch (e) {}
+    }
+
+    if (cookie) {
+      sessionCache = {
+        cookie,
+        crumb,
+        expiry: Date.now() + 6 * 60 * 60 * 1000 // 6 hours validity
+      };
+      return sessionCache;
     }
   } catch (err) {
-    console.warn(`Yahoo cookie fetch warning: ${err.message}`);
+    console.warn(`Yahoo session fetch warning: ${err.message}`);
   }
-  return cachedCookie || '';
+
+  return sessionCache;
 }
 
 // Standard Indian symbols alias dictionary
@@ -86,30 +115,71 @@ function normalizeSymbol(symbol) {
 }
 
 /**
- * Direct Yahoo Finance v8 chart fetch with Session Cookie
- * Bypasses crumb requirements and eliminates 429 Too Many Requests on Render/AWS/Cloud hosts
+ * Fetch Live Price from Groww (Backup / Live Price Enhancer for Indian NSE Stocks)
  */
-async function fetchDirectChart(symbol, retryWithNewCookie = true) {
-  const cookie = await getYahooCookie();
+async function fetchGrowwLive(symbol) {
+  try {
+    const cleanSym = symbol.replace('.NS', '').replace('^', '').trim().toUpperCase();
+    if (cleanSym.includes('.') || cleanSym.startsWith('^')) return null;
+
+    const url = `https://groww.in/v1/api/stocks_data/v1/accord_points/exchange/NSE/segment/CASH/latest_prices_ohlc/${encodeURIComponent(cleanSym)}`;
+    const res = await fetch(url, {
+      headers: {
+        'User-Agent': getRandomUserAgent(),
+        'Accept': 'application/json'
+      }
+    });
+
+    if (res.ok) {
+      const d = await res.json();
+      if (d && d.ltp) {
+        return {
+          price: d.ltp,
+          open: d.open,
+          high: d.high,
+          low: d.low,
+          close: d.close,
+          dayChange: d.dayChange,
+          dayChangePerc: d.dayChangePerc,
+          volume: d.volume
+        };
+      }
+    }
+  } catch (e) {
+    // silently ignore Groww fallback error
+  }
+  return null;
+}
+
+/**
+ * Direct Yahoo Finance v8 chart fetch with Session Cookie + Crumb
+ * Prevents 429 Too Many Requests on Render/AWS/Cloud hosts
+ */
+async function fetchDirectChart(symbol, retry = true) {
+  const { cookie, crumb } = await getYahooSession();
   const hosts = ['query2.finance.yahoo.com', 'query1.finance.yahoo.com'];
   let lastError = null;
 
   for (const host of hosts) {
     try {
-      const url = `https://${host}/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=1y`;
+      let url = `https://${host}/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=1y`;
+      if (crumb) {
+        url += `&crumb=${encodeURIComponent(crumb)}`;
+      }
+
       const res = await fetch(url, {
         headers: {
           'User-Agent': getRandomUserAgent(),
-          'Cookie': cookie,
+          ...(cookie ? { 'Cookie': cookie } : {}),
           'Accept': '*/*',
           'Accept-Language': 'en-US,en;q=0.9'
         }
       });
 
-      if (res.status === 429 && retryWithNewCookie) {
-        // Refresh session cookie on 429 and retry once after backoff delay
-        await new Promise(r => setTimeout(r, 800));
-        await getYahooCookie(true);
+      if (res.status === 429 && retry) {
+        // Rate-limit hit: wait 1 second, refresh session, and retry once
+        await new Promise(r => setTimeout(r, 1000));
+        await getYahooSession(true);
         return fetchDirectChart(symbol, false);
       }
 
@@ -183,7 +253,7 @@ async function fetchDirectChart(symbol, retryWithNewCookie = true) {
 }
 
 /**
- * Fetch Quote and Historical Candlestick Bars
+ * Fetch Quote and Historical Candlestick Bars (Multi-Tier Resilient Architecture)
  */
 async function fetchRawMarketData(symbol) {
   const normalized = normalizeSymbol(symbol);
@@ -194,30 +264,78 @@ async function fetchRawMarketData(symbol) {
     return cached.data;
   }
 
+  let payload = null;
+
+  // 1. Try Direct Yahoo Fetch with Cookie + Crumb
   try {
-    const payload = await fetchDirectChart(normalized);
-    cache.set(cacheKey, { timestamp: Date.now(), data: payload });
-    return payload;
+    payload = await fetchDirectChart(normalized);
   } catch (err) {
-    // If normalized had .NS and failed, try raw symbol without suffix (e.g. US stocks like AAPL)
+    // If symbol had .NS and failed, try raw symbol without suffix
     if (normalized.endsWith('.NS') && normalized !== '^NSEI') {
       const altSymbol = normalized.replace('.NS', '');
       try {
-        const altData = await fetchDirectChart(altSymbol);
-        cache.set(cacheKey, { timestamp: Date.now(), data: altData });
-        return altData;
-      } catch (e2) {
-        // Fall back to synthetic resilient generator
+        payload = await fetchDirectChart(altSymbol);
+      } catch (e2) {}
+    }
+  }
+
+  // 2. If Direct Yahoo Fetch Succeeded: Save to In-Memory & MongoDB Cache
+  if (payload && payload.bars && payload.bars.length > 0) {
+    // Optionally enhance with live Groww NSE quote if available
+    if (normalized.endsWith('.NS')) {
+      const liveGroww = await fetchGrowwLive(normalized);
+      if (liveGroww) {
+        payload.regularMarketPrice = liveGroww.price;
+        payload.regularMarketChange = Number(liveGroww.dayChange.toFixed(2));
+        payload.regularMarketChangePercent = Number(liveGroww.dayChangePerc.toFixed(2));
+        payload.regularMarketDayHigh = liveGroww.high;
+        payload.regularMarketDayLow = liveGroww.low;
+        // Update the last candle
+        const last = payload.bars[payload.bars.length - 1];
+        if (last) {
+          last.close = liveGroww.price;
+          last.high = Math.max(last.high, liveGroww.high);
+          last.low = Math.min(last.low, liveGroww.low);
+        }
       }
     }
 
-    console.warn(`All direct fetch attempts failed for ${symbol} (${err.message}). Using resilient fallback generator.`);
-    return generateSyntheticFallback(normalized);
+    cache.set(cacheKey, { timestamp: Date.now(), data: payload });
+    // Asynchronously update MongoDB cache
+    setCachedMarketData(normalized, payload).catch(() => {});
+    return payload;
   }
+
+  // 3. Fallback Tier 1: Check Persistent Real MongoDB Historical Cache
+  const mongoData = await getCachedMarketData(normalized);
+  if (mongoData && mongoData.bars && mongoData.bars.length > 0) {
+    console.log(`ℹ️ Serving ${normalized} from persistent MongoDB historical cache.`);
+    // Try to update current price with live Groww quote
+    if (normalized.endsWith('.NS')) {
+      const live = await fetchGrowwLive(normalized);
+      if (live) {
+        mongoData.regularMarketPrice = live.price;
+        mongoData.regularMarketChange = Number(live.dayChange.toFixed(2));
+        mongoData.regularMarketChangePercent = Number(live.dayChangePerc.toFixed(2));
+        const last = mongoData.bars[mongoData.bars.length - 1];
+        if (last) {
+          last.close = live.price;
+        }
+      }
+    }
+    cache.set(cacheKey, { timestamp: Date.now(), data: mongoData });
+    return mongoData;
+  }
+
+  // 4. Fallback Tier 2: Resilient Generator (only if database & network are completely unreachable)
+  console.warn(`All data sources unavailable for ${symbol}. Using resilient fallback generator.`);
+  const fallback = generateSyntheticFallback(normalized);
+  cache.set(cacheKey, { timestamp: Date.now(), data: fallback });
+  return fallback;
 }
 
 /**
- * Resilient Synthetic Fallback (Guarantees uninterrupted operation even if network drops)
+ * Resilient Synthetic Fallback (Only used if cloud network is completely severed)
  */
 function generateSyntheticFallback(symbol) {
   let basePrice = 25290;
@@ -232,7 +350,7 @@ function generateSyntheticFallback(symbol) {
     basePrice = 1375;
     name = 'RELIANCE INDUSTRIES';
   } else if (symbol.includes('TCS')) {
-    basePrice = 2340;
+    basePrice = 2342;
     name = 'TATA CONSULTANCY SERVICES';
   } else {
     name = symbol;
@@ -381,7 +499,7 @@ async function analyzeAsset(symbol) {
  */
 async function searchSymbols(query) {
   if (!query || query.trim().length === 0) return [];
-  const cookie = await getYahooCookie();
+  const { cookie } = await getYahooSession();
   const hosts = ['query2.finance.yahoo.com', 'query1.finance.yahoo.com'];
 
   for (const host of hosts) {
@@ -390,7 +508,7 @@ async function searchSymbols(query) {
       const res = await fetch(url, {
         headers: {
           'User-Agent': getRandomUserAgent(),
-          'Cookie': cookie,
+          ...(cookie ? { 'Cookie': cookie } : {}),
           'Accept': '*/*'
         }
       });
