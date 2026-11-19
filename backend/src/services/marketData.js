@@ -1,4 +1,3 @@
-const YahooFinance = require('yahoo-finance2').default;
 const {
   calculateEMA,
   calculateRSI,
@@ -11,12 +10,52 @@ const {
 } = require('./indicators');
 const { detectCandlestickPatterns } = require('./candlestickPatterns');
 const { generateMarketPrediction } = require('./predictionEngine');
-
-const yf = new YahooFinance({ suppressNotices: ['yahooSurvey'] });
+const { generateAccuracyReport } = require('./accuracyReport');
 
 // In-memory cache for ultra-fast response and rate-limiting resilience
 const cache = new Map();
 const CACHE_TTL_MS = 30 * 1000; // 30 seconds
+
+// Session Cookie Cache for Yahoo Finance (Bypasses 429 Too Many Requests on Cloud Hosts)
+let cachedCookie = null;
+let cookieExpiry = 0;
+
+const USER_AGENTS = [
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0'
+];
+
+function getRandomUserAgent() {
+  return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+}
+
+/**
+ * Obtain and Cache Anonymous Yahoo Finance Session Cookie
+ */
+async function getYahooCookie(forceRefresh = false) {
+  if (!forceRefresh && cachedCookie && Date.now() < cookieExpiry) {
+    return cachedCookie;
+  }
+
+  try {
+    const res = await fetch('https://fc.yahoo.com', {
+      headers: {
+        'User-Agent': getRandomUserAgent()
+      }
+    });
+    const setCookie = res.headers.get('set-cookie');
+    if (setCookie) {
+      cachedCookie = setCookie.split(';')[0];
+      cookieExpiry = Date.now() + 6 * 60 * 60 * 1000; // 6 hours validity
+      return cachedCookie;
+    }
+  } catch (err) {
+    console.warn(`Yahoo cookie fetch warning: ${err.message}`);
+  }
+  return cachedCookie || '';
+}
 
 // Standard Indian symbols alias dictionary
 const SYMBOL_ALIASES = {
@@ -29,7 +68,9 @@ const SYMBOL_ALIASES = {
   '^BSESN': '^BSESN',
   'BANKNIFTY': '^NSEBANK',
   '^NSEBANK': '^NSEBANK',
-  'FINNIFTY': 'NIFTY_FIN_SERVICE.NS'
+  'FINNIFTY': 'NIFTY_FIN_SERVICE.NS',
+  'TATAMOTORS': 'TMPV.NS',
+  'TATAMOTORS.NS': 'TMPV.NS'
 };
 
 function normalizeSymbol(symbol) {
@@ -39,10 +80,106 @@ function normalizeSymbol(symbol) {
 
   // If simple stock name without suffix and not starting with ^, try appending .NS for Indian stocks
   if (!clean.includes('.') && !clean.startsWith('^')) {
-    // If user enters e.g. "RELIANCE", default to "RELIANCE.NS"
     return `${clean}.NS`;
   }
   return clean;
+}
+
+/**
+ * Direct Yahoo Finance v8 chart fetch with Session Cookie
+ * Bypasses crumb requirements and eliminates 429 Too Many Requests on Render/AWS/Cloud hosts
+ */
+async function fetchDirectChart(symbol, retryWithNewCookie = true) {
+  const cookie = await getYahooCookie();
+  const hosts = ['query2.finance.yahoo.com', 'query1.finance.yahoo.com'];
+  let lastError = null;
+
+  for (const host of hosts) {
+    try {
+      const url = `https://${host}/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=1y`;
+      const res = await fetch(url, {
+        headers: {
+          'User-Agent': getRandomUserAgent(),
+          'Cookie': cookie,
+          'Accept': '*/*',
+          'Accept-Language': 'en-US,en;q=0.9'
+        }
+      });
+
+      if (res.status === 429 && retryWithNewCookie) {
+        // Refresh session cookie on 429 and retry once after backoff delay
+        await new Promise(r => setTimeout(r, 800));
+        await getYahooCookie(true);
+        return fetchDirectChart(symbol, false);
+      }
+
+      if (!res.ok) {
+        lastError = new Error(`HTTP ${res.status}: ${res.statusText}`);
+        continue;
+      }
+
+      const data = await res.json();
+      const res0 = data.chart?.result?.[0];
+      if (!res0) {
+        lastError = new Error(`No chart data returned for ${symbol}`);
+        continue;
+      }
+
+      const meta = res0.meta || {};
+      const ts = res0.timestamp || [];
+      const q = res0.indicators?.quote?.[0] || {};
+
+      const bars = [];
+      for (let i = 0; i < ts.length; i++) {
+        if (
+          q.open && q.open[i] != null &&
+          q.high && q.high[i] != null &&
+          q.low && q.low[i] != null &&
+          q.close && q.close[i] != null
+        ) {
+          const d = new Date(ts[i] * 1000);
+          bars.push({
+            date: d.toISOString().split('T')[0],
+            time: ts[i],
+            open: Number(q.open[i].toFixed(2)),
+            high: Number(q.high[i].toFixed(2)),
+            low: Number(q.low[i].toFixed(2)),
+            close: Number(q.close[i].toFixed(2)),
+            volume: q.volume ? q.volume[i] || 0 : 0
+          });
+        }
+      }
+
+      if (bars.length === 0) {
+        lastError = new Error(`No valid bars parsed for ${symbol}`);
+        continue;
+      }
+
+      const lastBar = bars[bars.length - 1];
+      const prevClose = meta.chartPreviousClose || (bars.length > 1 ? bars[bars.length - 2].close : lastBar.close);
+      const currentPrice = meta.regularMarketPrice || lastBar.close;
+      const change = Number((currentPrice - prevClose).toFixed(2));
+      const changePercent = Number(((change / (prevClose || 1)) * 100).toFixed(2));
+
+      return {
+        symbol,
+        shortName: meta.shortName || meta.longName || symbol,
+        regularMarketPrice: currentPrice,
+        regularMarketChange: change,
+        regularMarketChangePercent: changePercent,
+        regularMarketDayHigh: meta.regularMarketDayHigh || lastBar.high,
+        regularMarketDayLow: meta.regularMarketDayLow || lastBar.low,
+        regularMarketVolume: meta.regularMarketVolume || lastBar.volume,
+        marketState: 'REGULAR',
+        currency: meta.currency || 'INR',
+        bars
+      };
+    } catch (err) {
+      lastError = err;
+    }
+  }
+
+  throw lastError || new Error(`Failed to fetch ${symbol} from all Yahoo endpoints`);
 }
 
 /**
@@ -58,71 +195,29 @@ async function fetchRawMarketData(symbol) {
   }
 
   try {
-    // 1. Fetch real-time quote
-    const quote = await yf.quote(normalized);
-
-    // 2. Fetch daily historical candles for indicator calculations
-    const today = new Date();
-    const oneYearAgo = new Date(today.getTime() - 365 * 24 * 60 * 60 * 1000);
-
-    const chartRes = await yf.chart(normalized, {
-      period1: oneYearAgo.toISOString().split('T')[0],
-      interval: '1d'
-    });
-
-    const rawQuotes = chartRes.quotes || [];
-    // Filter out null or incomplete candles
-    const validBars = rawQuotes
-      .filter(q => q.open && q.high && q.low && q.close)
-      .map(q => ({
-        date: q.date instanceof Date ? q.date.toISOString().split('T')[0] : String(q.date).split('T')[0],
-        time: Math.floor(new Date(q.date).getTime() / 1000),
-        open: Number(q.open.toFixed(2)),
-        high: Number(q.high.toFixed(2)),
-        low: Number(q.low.toFixed(2)),
-        close: Number(q.close.toFixed(2)),
-        volume: q.volume || 0
-      }));
-
-    if (validBars.length === 0) {
-      throw new Error(`No historical candle data found for ${symbol}`);
-    }
-
-    const payload = {
-      symbol: normalized,
-      shortName: quote.shortName || quote.longName || normalized,
-      regularMarketPrice: quote.regularMarketPrice || validBars[validBars.length - 1].close,
-      regularMarketChange: quote.regularMarketChange || 0,
-      regularMarketChangePercent: quote.regularMarketChangePercent || 0,
-      regularMarketDayHigh: quote.regularMarketDayHigh || validBars[validBars.length - 1].high,
-      regularMarketDayLow: quote.regularMarketDayLow || validBars[validBars.length - 1].low,
-      regularMarketVolume: quote.regularMarketVolume || validBars[validBars.length - 1].volume,
-      marketState: quote.marketState || 'REGULAR',
-      currency: quote.currency || 'INR',
-      bars: validBars
-    };
-
+    const payload = await fetchDirectChart(normalized);
     cache.set(cacheKey, { timestamp: Date.now(), data: payload });
     return payload;
   } catch (err) {
-    console.warn(`Yahoo Finance fetch warning for ${symbol}: ${err.message}. Checking fallback...`);
     // If normalized had .NS and failed, try raw symbol without suffix (e.g. US stocks like AAPL)
     if (normalized.endsWith('.NS') && normalized !== '^NSEI') {
       const altSymbol = normalized.replace('.NS', '');
       try {
-        const altData = await fetchRawMarketData(altSymbol);
+        const altData = await fetchDirectChart(altSymbol);
+        cache.set(cacheKey, { timestamp: Date.now(), data: altData });
         return altData;
       } catch (e2) {
         // Fall back to synthetic resilient generator
       }
     }
 
+    console.warn(`All direct fetch attempts failed for ${symbol} (${err.message}). Using resilient fallback generator.`);
     return generateSyntheticFallback(normalized);
   }
 }
 
 /**
- * Resilient Synthetic Fallback (Guarantees uninterrupted operation even if network or Yahoo drops)
+ * Resilient Synthetic Fallback (Guarantees uninterrupted operation even if network drops)
  */
 function generateSyntheticFallback(symbol) {
   let basePrice = 25290;
@@ -134,8 +229,11 @@ function generateSyntheticFallback(symbol) {
     basePrice = 52400;
     name = 'BANK NIFTY';
   } else if (symbol.includes('RELIANCE')) {
-    basePrice = 1345;
+    basePrice = 1375;
     name = 'RELIANCE INDUSTRIES';
+  } else if (symbol.includes('TCS')) {
+    basePrice = 2340;
+    name = 'TATA CONSULTANCY SERVICES';
   } else {
     name = symbol;
     basePrice = 1500;
@@ -279,40 +377,57 @@ async function analyzeAsset(symbol) {
 }
 
 /**
- * Search Stocks and Indices
+ * Search Stocks and Indices (Direct v1 search with Session Cookie)
  */
 async function searchSymbols(query) {
   if (!query || query.trim().length === 0) return [];
-  try {
-    const res = await yf.search(query, { newsCount: 0 });
-    const quotes = res.quotes || [];
-    return quotes
-      .filter(q => q.symbol && (q.shortname || q.longname))
-      .slice(0, 8)
-      .map(q => ({
-        symbol: q.symbol,
-        name: q.shortname || q.longname,
-        exchange: q.exchange || 'NSE',
-        type: q.quoteType || 'EQUITY'
-      }));
-  } catch (err) {
-    console.warn(`Search fallback for "${query}": ${err.message}`);
-    // Fallback popular symbols if search is throttled
-    const popular = [
-      { symbol: '^NSEI', name: 'Nifty 50 Index', exchange: 'NSE', type: 'INDEX' },
-      { symbol: '^BSESN', name: 'BSE Sensex Index', exchange: 'BSE', type: 'INDEX' },
-      { symbol: '^NSEBANK', name: 'Bank Nifty Index', exchange: 'NSE', type: 'INDEX' },
-      { symbol: 'RELIANCE.NS', name: 'Reliance Industries Ltd.', exchange: 'NSE', type: 'EQUITY' },
-      { symbol: 'TCS.NS', name: 'Tata Consultancy Services', exchange: 'NSE', type: 'EQUITY' },
-      { symbol: 'HDFCBANK.NS', name: 'HDFC Bank Ltd.', exchange: 'NSE', type: 'EQUITY' },
-      { symbol: 'INFY.NS', name: 'Infosys Ltd.', exchange: 'NSE', type: 'EQUITY' },
-      { symbol: 'TATAMOTORS.NS', name: 'Tata Motors Ltd.', exchange: 'NSE', type: 'EQUITY' }
-    ];
-    return popular.filter(p =>
-      p.symbol.toLowerCase().includes(query.toLowerCase()) ||
-      p.name.toLowerCase().includes(query.toLowerCase())
-    );
+  const cookie = await getYahooCookie();
+  const hosts = ['query2.finance.yahoo.com', 'query1.finance.yahoo.com'];
+
+  for (const host of hosts) {
+    try {
+      const url = `https://${host}/v1/finance/search?q=${encodeURIComponent(query)}&quotesCount=8&newsCount=0`;
+      const res = await fetch(url, {
+        headers: {
+          'User-Agent': getRandomUserAgent(),
+          'Cookie': cookie,
+          'Accept': '*/*'
+        }
+      });
+
+      if (!res.ok) continue;
+
+      const data = await res.json();
+      const quotes = data.quotes || [];
+      return quotes
+        .filter(q => q.symbol && (q.shortname || q.longname))
+        .slice(0, 8)
+        .map(q => ({
+          symbol: q.symbol,
+          name: q.shortname || q.longname,
+          exchange: q.exchange || 'NSE',
+          type: q.quoteType || 'EQUITY'
+        }));
+    } catch (err) {
+      // try next host
+    }
   }
+
+  // Fallback popular symbols if search is throttled
+  const popular = [
+    { symbol: '^NSEI', name: 'Nifty 50 Index', exchange: 'NSE', type: 'INDEX' },
+    { symbol: '^BSESN', name: 'BSE Sensex Index', exchange: 'BSE', type: 'INDEX' },
+    { symbol: '^NSEBANK', name: 'Bank Nifty Index', exchange: 'NSE', type: 'INDEX' },
+    { symbol: 'RELIANCE.NS', name: 'Reliance Industries Ltd.', exchange: 'NSE', type: 'EQUITY' },
+    { symbol: 'TCS.NS', name: 'Tata Consultancy Services', exchange: 'NSE', type: 'EQUITY' },
+    { symbol: 'HDFCBANK.NS', name: 'HDFC Bank Ltd.', exchange: 'NSE', type: 'EQUITY' },
+    { symbol: 'INFY.NS', name: 'Infosys Ltd.', exchange: 'NSE', type: 'EQUITY' },
+    { symbol: 'TMPV.NS', name: 'Tata Motors Ltd.', exchange: 'NSE', type: 'EQUITY' }
+  ];
+  return popular.filter(p =>
+    p.symbol.toLowerCase().includes(query.toLowerCase()) ||
+    p.name.toLowerCase().includes(query.toLowerCase())
+  );
 }
 
 /**
@@ -344,8 +459,6 @@ async function getIndicesOverview() {
   return results.filter(Boolean);
 }
 
-const { generateAccuracyReport } = require('./accuracyReport');
-
 /**
  * Fetch 1-Month Accuracy & Performance Report
  */
@@ -370,4 +483,3 @@ module.exports = {
   normalizeSymbol,
   getAssetAccuracyReport
 };
-
