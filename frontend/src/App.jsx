@@ -63,7 +63,11 @@ export default function App() {
       }
     } catch (err) {
       console.error('Error fetching asset analysis:', err);
-      setError(err.response?.data?.error || err.message || 'Failed to load market data');
+      let errorMsg = err.response?.data?.error || err.message || 'Failed to load market data';
+      if (err.code === 'ECONNABORTED' || (typeof errorMsg === 'string' && errorMsg.includes('timeout'))) {
+        errorMsg = 'Cloud server is waking up from free-tier sleep (takes ~25-35s on initial launch). Click Retry below to connect.';
+      }
+      setError(errorMsg);
     } finally {
       setLoading(false);
     }

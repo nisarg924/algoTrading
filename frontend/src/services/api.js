@@ -4,8 +4,29 @@ const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:5001/api/
 
 const api = axios.create({
   baseURL: API_BASE_URL,
-  timeout: 15000
+  timeout: 60000 // 60 seconds (allows Render free tier cold-start to wake up smoothly)
 });
+
+// Auto-retry interceptor for cold-start timeouts
+api.interceptors.response.use(
+  response => response,
+  async error => {
+    const config = error.config;
+    // If request timed out or network error, retry once automatically
+    if (!config || config._retry) {
+      return Promise.reject(error);
+    }
+
+    if (error.code === 'ECONNABORTED' || error.message.includes('timeout') || !error.response) {
+      config._retry = true;
+      console.warn('Backend cold-start detected. Auto-retrying request in 2 seconds...');
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      return api(config);
+    }
+
+    return Promise.reject(error);
+  }
+);
 
 export async function fetchAssetAnalysis(symbol = '^NSEI') {
   const res = await api.get('/analyze', { params: { symbol } });
