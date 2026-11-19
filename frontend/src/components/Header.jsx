@@ -75,7 +75,7 @@ export default function Header({
           <div>
             <div className="flex items-center gap-2">
               <h1 className="text-xl font-bold tracking-tight text-white font-mono">
-                Alpha<span className="text-blue-400">Trend</span>.AI
+                mid<span className="text-blue-400">Trade</span>
               </h1>
               <span className="bg-emerald-500/10 text-emerald-400 text-[10px] font-semibold px-2 py-0.5 rounded-full border border-emerald-500/20">
                 PRO ALGO

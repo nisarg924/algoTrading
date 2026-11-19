@@ -1,5 +1,5 @@
 {
-  "name": "algo-trading-backend",
+  "name": "midtrade-backend",
   "version": "1.0.0",
   "description": "Algorithmic Trading & Next-Day Market Opening Prediction API",
   "main": "src/server.js",

@@ -1,4 +1,4 @@
-# AlphaTrend AI - Algorithmic Market Prediction & Trading Platform 🚀📈
+# midTrade - Algorithmic Market Prediction & Trading Platform 🚀📈
 
 > **Professional MERN Stack Quantitative Trading Platform** engineered to predict the **next-day market opening trend** for **NIFTY 50**, **BSE SENSEX**, **BANK NIFTY**, and **any Indian/Global stock** using multi-factor algorithmic analysis.
 

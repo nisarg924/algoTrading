@@ -223,7 +223,7 @@ export default function App() {
         <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-3">
           <div className="flex items-center gap-2 text-slate-400 font-mono">
             <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-            <span>AlphaTrend Algorithmic Market Prediction System</span>
+            <span>midTrade Algorithmic Market Prediction System</span>
           </div>
           <div>
             Built with MERN Stack • Real-time OHLCV • Multi-Factor Quantitative Model
