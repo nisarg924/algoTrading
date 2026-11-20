@@ -24,8 +24,16 @@ export default function PredictionHero({ assetData }) {
   const isBearish = prediction.trendDirection === 'BEARISH';
 
   // Calculate position within day's high-low range
-  const dayRange = (meta.dayHigh - meta.dayLow) || 1;
-  const rangePosition = Math.min(100, Math.max(0, ((meta.price - meta.dayLow) / dayRange) * 100));
+  const price = Number(meta?.price) || 0;
+  const dayHigh = Number(meta?.dayHigh) || price;
+  const dayLow = Number(meta?.dayLow) || price;
+  const dayRange = (dayHigh - dayLow) || 1;
+  const rangePosition = dayRange > 0 ? Math.min(100, Math.max(0, ((price - dayLow) / dayRange) * 100)) : 50;
+
+  // Safe VWAP extraction (indicators.vwap is an object { current, status, diffPercent })
+  const vwapValue = typeof indicators?.vwap === 'object' && indicators.vwap !== null
+    ? indicators.vwap.current
+    : (typeof indicators?.vwap === 'number' ? indicators.vwap : null);
 
   // Dynamic Theme Colors based on sentiment
   const themeClasses = isBullish
@@ -128,8 +136,8 @@ export default function PredictionHero({ assetData }) {
           {/* Intraday Range Slider & Stats */}
           <div className="lg:col-span-4 p-3 rounded-xl bg-dark-950/80 border border-slate-800 space-y-2">
             <div className="flex justify-between text-xs font-mono">
-              <span className="text-slate-400">Day Low: <strong className="text-slate-200">₹{meta.dayLow?.toFixed(2)}</strong></span>
-              <span className="text-slate-400">Day High: <strong className="text-slate-200">₹{meta.dayHigh?.toFixed(2)}</strong></span>
+              <span className="text-slate-400">Day Low: <strong className="text-slate-200">{meta?.dayLow != null ? `₹${Number(meta.dayLow).toFixed(2)}` : '—'}</strong></span>
+              <span className="text-slate-400">Day High: <strong className="text-slate-200">{meta?.dayHigh != null ? `₹${Number(meta.dayHigh).toFixed(2)}` : '—'}</strong></span>
             </div>
 
             {/* Range Bar with Indicator Dot */}
@@ -141,8 +149,8 @@ export default function PredictionHero({ assetData }) {
             </div>
 
             <div className="flex justify-between items-center text-[11px] font-mono text-slate-400 pt-1">
-              <span>VWAP: <strong className="text-slate-300">₹{indicators.vwap?.toFixed(2)}</strong></span>
-              <span>Position: <strong className="text-blue-400">{rangePosition.toFixed(0)}% of Range</strong></span>
+              <span>VWAP: <strong className="text-slate-300">{vwapValue != null ? `₹${Number(vwapValue).toFixed(2)}` : '—'}</strong></span>
+              <span>Position: <strong className="text-blue-400">{!isNaN(rangePosition) ? `${rangePosition.toFixed(0)}% of Range` : '50%'}</strong></span>
             </div>
           </div>
         </div>
@@ -244,15 +252,15 @@ export default function PredictionHero({ assetData }) {
             <div className="grid grid-cols-3 gap-2 text-center text-xs font-mono">
               <div className="p-2 rounded-lg bg-rose-950/40 border border-rose-900/50">
                 <div className="text-rose-400 text-[10px] font-bold">RESISTANCE (R1)</div>
-                <div className="text-white font-bold mt-0.5">{indicators.pivots.classic.r1.toFixed(1)}</div>
+                <div className="text-white font-bold mt-0.5">{indicators?.pivots?.classic?.r1 != null ? Number(indicators.pivots.classic.r1).toFixed(1) : '—'}</div>
               </div>
               <div className="p-2 rounded-lg bg-amber-950/40 border border-amber-900/50">
                 <div className="text-amber-400 text-[10px] font-bold">PIVOT (P)</div>
-                <div className="text-white font-bold mt-0.5">{indicators.pivots.classic.pivot.toFixed(1)}</div>
+                <div className="text-white font-bold mt-0.5">{indicators?.pivots?.classic?.pivot != null ? Number(indicators.pivots.classic.pivot).toFixed(1) : '—'}</div>
               </div>
               <div className="p-2 rounded-lg bg-emerald-950/40 border border-emerald-900/50">
                 <div className="text-emerald-400 text-[10px] font-bold">SUPPORT (S1)</div>
-                <div className="text-white font-bold mt-0.5">{indicators.pivots.classic.s1.toFixed(1)}</div>
+                <div className="text-white font-bold mt-0.5">{indicators?.pivots?.classic?.s1 != null ? Number(indicators.pivots.classic.s1).toFixed(1) : '—'}</div>
               </div>
             </div>
 
