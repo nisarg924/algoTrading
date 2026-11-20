@@ -8,6 +8,7 @@ export default function Header({
   onOpenSearch,
   onRefresh,
   loading,
+  isSyncing,
   lastUpdated,
   activeTab = 'predictor',
   onChangeTab
@@ -25,18 +26,20 @@ export default function Header({
             {indices.map(idx => {
               const isPositive = idx.changePercent >= 0;
               const isSelected = selectedSymbol === idx.symbol;
+              const isBullish = idx.predictedTrend?.includes('BULL');
+
               return (
                 <button
                   key={idx.symbol}
                   onClick={() => onSelectSymbol(idx.symbol)}
-                  className={`flex items-center gap-2 px-2.5 py-1 rounded transition-all ${
+                  className={`flex items-center gap-2 px-2.5 py-1 rounded-lg transition-all ${
                     isSelected
-                      ? 'bg-blue-600/20 text-blue-300 border border-blue-500/40'
-                      : 'hover:bg-slate-800/60 text-slate-300'
+                      ? 'bg-blue-600/20 text-blue-300 border border-blue-500/40 shadow-sm'
+                      : 'hover:bg-slate-800/60 text-slate-300 border border-transparent'
                   }`}
                 >
                   <span className="font-semibold">{idx.name || idx.symbol}</span>
-                  <span className="font-mono text-slate-200">
+                  <span className="font-mono text-slate-100 font-bold">
                     {idx.price ? Number(idx.price).toLocaleString('en-IN', { maximumFractionDigits: 2 }) : '—'}
                   </span>
                   <span
@@ -47,6 +50,18 @@ export default function Header({
                     {isPositive ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
                     {isPositive ? '+' : ''}{idx.changePercent}%
                   </span>
+                  {idx.predictedTrend && (
+                    <span
+                      className={`text-[9px] font-bold px-1.5 py-0.5 rounded border ${
+                        isBullish
+                          ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30'
+                          : 'bg-rose-500/10 text-rose-300 border-rose-500/30'
+                      }`}
+                      title={`Tomorrow Forecast: ${idx.predictedTrend}`}
+                    >
+                      {isBullish ? '▲ BULL' : '▼ BEAR'}
+                    </span>
+                  )}
                 </button>
               );
             })}
@@ -57,6 +72,10 @@ export default function Header({
               <Clock className="w-3 h-3 text-slate-500" />
               NSE / BSE Real-time
             </span>
+            <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 font-mono text-[10px]">
+              <span className={`w-1.5 h-1.5 rounded-full bg-emerald-400 ${isSyncing ? 'animate-ping' : 'animate-pulse'}`}></span>
+              <span>{isSyncing ? 'Syncing...' : 'Auto-Sync Live'}</span>
+            </div>
             <span className="flex items-center gap-1 text-emerald-400">
               <ShieldCheck className="w-3 h-3" />
               Algo Engine Live

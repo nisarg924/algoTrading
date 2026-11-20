@@ -25,6 +25,7 @@ export default function App() {
   const [indices, setIndices] = useState([]);
   const [watchlist, setWatchlist] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [isSyncing, setIsSyncing] = useState(false);
   const [error, setError] = useState(null);
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [lastUpdated, setLastUpdated] = useState(null);
@@ -50,26 +51,36 @@ export default function App() {
   }, []);
 
   // Load Analysis for currently selected symbol
-  const loadAssetAnalysis = useCallback(async (symbol) => {
-    setLoading(true);
-    setError(null);
+  const loadAssetAnalysis = useCallback(async (symbol, isBackground = false) => {
+    if (!isBackground) {
+      setLoading(true);
+      setError(null);
+    } else {
+      setIsSyncing(true);
+    }
+
     try {
       const res = await fetchAssetAnalysis(symbol);
       if (res && res.data) {
         setAssetData(res.data);
         setLastUpdated(new Date());
-      } else {
+      } else if (!isBackground) {
         throw new Error('No data received from analysis engine');
       }
     } catch (err) {
-      console.error('Error fetching asset analysis:', err);
-      let errorMsg = err.response?.data?.error || err.message || 'Failed to load market data';
-      if (err.code === 'ECONNABORTED' || (typeof errorMsg === 'string' && errorMsg.includes('timeout'))) {
-        errorMsg = 'Cloud server is waking up from free-tier sleep (takes ~25-35s on initial launch). Click Retry below to connect.';
+      if (!isBackground) {
+        console.error('Error fetching asset analysis:', err);
+        let errorMsg = err.response?.data?.error || err.message || 'Failed to load market data';
+        if (err.code === 'ECONNABORTED' || (typeof errorMsg === 'string' && errorMsg.includes('timeout'))) {
+          errorMsg = 'Cloud server is waking up from free-tier sleep (takes ~25-35s on initial launch). Click Retry below to connect.';
+        }
+        setError(errorMsg);
       }
-      setError(errorMsg);
     } finally {
-      setLoading(false);
+      if (!isBackground) {
+        setLoading(false);
+      }
+      setIsSyncing(false);
     }
   }, []);
 
@@ -81,8 +92,19 @@ export default function App() {
 
   // Load asset on symbol change
   useEffect(() => {
-    loadAssetAnalysis(selectedSymbol);
+    loadAssetAnalysis(selectedSymbol, false);
   }, [selectedSymbol, loadAssetAnalysis]);
+
+  // Background Live Runtime Sync (every 10 seconds)
+  useEffect(() => {
+    const timer = setInterval(() => {
+      loadIndices();
+      loadWatchlist();
+      loadAssetAnalysis(selectedSymbol, true);
+    }, 10000);
+
+    return () => clearInterval(timer);
+  }, [loadIndices, loadWatchlist, loadAssetAnalysis, selectedSymbol]);
 
   // Keyboard shortcut (Cmd/Ctrl + K for search)
   useEffect(() => {
@@ -120,16 +142,18 @@ export default function App() {
         onSelectSymbol={handleSelectSymbol}
         onOpenSearch={() => setIsSearchOpen(true)}
         onRefresh={() => {
-          loadAssetAnalysis(selectedSymbol);
+          loadAssetAnalysis(selectedSymbol, false);
           loadIndices();
+          loadWatchlist();
         }}
         loading={loading}
+        isSyncing={isSyncing}
         lastUpdated={lastUpdated}
         activeTab={activeTab}
         onChangeTab={setActiveTab}
       />
 
-      {/* Quick Watchlist Bar */}
+      {/* Quick Watchlist Bar with Live Values & Tomorrow's Trend */}
       <WatchlistBar
         watchlist={watchlist}
         selectedSymbol={selectedSymbol}

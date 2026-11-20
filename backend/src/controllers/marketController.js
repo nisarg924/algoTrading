@@ -67,11 +67,34 @@ async function search(req, res) {
 
 /**
  * GET /api/market/watchlist
+ * Returns watchlist items enriched with real-time price & tomorrow prediction
  */
 async function getWatchlist(req, res) {
   try {
     const items = await Watchlist.getAllItems();
-    res.json({ success: true, data: items });
+    const enriched = await Promise.all(
+      items.map(async item => {
+        try {
+          const analysis = await analyzeAsset(item.symbol);
+          return {
+            symbol: item.symbol,
+            name: item.name || analysis.meta.name,
+            exchange: item.exchange || 'NSE',
+            price: analysis.meta.price,
+            change: analysis.meta.change,
+            changePercent: analysis.meta.changePercent,
+            dayHigh: analysis.meta.dayHigh,
+            dayLow: analysis.meta.dayLow,
+            predictedTrend: analysis.prediction.predictedTrend,
+            trendDirection: analysis.prediction.trendDirection,
+            confidenceScore: analysis.prediction.confidenceScore
+          };
+        } catch (e) {
+          return item;
+        }
+      })
+    );
+    res.json({ success: true, data: enriched });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
