@@ -68,7 +68,7 @@ async function getYahooSession(forceRefresh = false) {
               break;
             }
           }
-        } catch (e) {}
+        } catch (e) { }
       }
     }
 
@@ -114,6 +114,169 @@ function normalizeSymbol(symbol) {
     return `${clean}.NS`;
   }
   return clean;
+}
+
+// Upstox Benchmark Indices Instrument Key Mapping
+const UPSTOX_INDEX_MAP = {
+  '^NSEI': { key: 'NSE_INDEX|Nifty 50', name: 'NIFTY 50' },
+  'NIFTY': { key: 'NSE_INDEX|Nifty 50', name: 'NIFTY 50' },
+  'NIFTY50': { key: 'NSE_INDEX|Nifty 50', name: 'NIFTY 50' },
+  'NIFTY 50': { key: 'NSE_INDEX|Nifty 50', name: 'NIFTY 50' },
+  '^BSESN': { key: 'BSE_INDEX|SENSEX', name: 'BSE SENSEX' },
+  'SENSEX': { key: 'BSE_INDEX|SENSEX', name: 'BSE SENSEX' },
+  'BSESENSEX': { key: 'BSE_INDEX|SENSEX', name: 'BSE SENSEX' },
+  '^NSEBANK': { key: 'NSE_INDEX|Nifty Bank', name: 'BANK NIFTY' },
+  'BANKNIFTY': { key: 'NSE_INDEX|Nifty Bank', name: 'BANK NIFTY' },
+  'NIFTY_FIN_SERVICE.NS': { key: 'NSE_INDEX|Nifty Fin Service', name: 'NIFTY FINANCIAL SERVICES' },
+  'FINNIFTY': { key: 'NSE_INDEX|Nifty Fin Service', name: 'NIFTY FINANCIAL SERVICES' },
+  'NIFTY_IT.NS': { key: 'NSE_INDEX|Nifty IT', name: 'NIFTY IT' },
+  'NIFTYIT': { key: 'NSE_INDEX|Nifty IT', name: 'NIFTY IT' }
+};
+
+// Popular Equities ISIN mapping (for instantaneous resolution without network search)
+const POPULAR_EQUITY_ISIN = {
+  'RELIANCE.NS': { isin: 'INE002A01018', name: 'Reliance Industries Ltd.' },
+  'TCS.NS': { isin: 'INE467B01029', name: 'Tata Consultancy Services' },
+  'HDFCBANK.NS': { isin: 'INE040A01034', name: 'HDFC Bank Ltd.' },
+  'INFY.NS': { isin: 'INE009A01021', name: 'Infosys Ltd.' },
+  'TMPV.NS': { isin: 'INE155A01022', name: 'Tata Motors Ltd.' },
+  'TATAMOTORS.NS': { isin: 'INE155A01022', name: 'Tata Motors Ltd.' },
+  'ICICIBANK.NS': { isin: 'INE090A01021', name: 'ICICI Bank Ltd.' },
+  'SBIN.NS': { isin: 'INE062A01020', name: 'State Bank of India' },
+  'BHARTIARTL.NS': { isin: 'INE397D01024', name: 'Bharti Airtel Ltd.' },
+  'ITC.NS': { isin: 'INE154A01025', name: 'ITC Ltd.' },
+  'KOTAKBANK.NS': { isin: 'INE237A01028', name: 'Kotak Mahindra Bank' },
+  'LT.NS': { isin: 'INE018A01030', name: 'Larsen & Toubro Ltd.' },
+  'AXISBANK.NS': { isin: 'INE238A01034', name: 'Axis Bank Ltd.' },
+  'MARUTI.NS': { isin: 'INE585B01010', name: 'Maruti Suzuki India' },
+  'SUNPHARMA.NS': { isin: 'INE044A01036', name: 'Sun Pharmaceutical' },
+  'TITAN.NS': { isin: 'INE280A01028', name: 'Titan Company Ltd.' },
+  'BAJFINANCE.NS': { isin: 'INE296A01024', name: 'Bajaj Finance Ltd.' },
+  'WIPRO.NS': { isin: 'INE075A01022', name: 'Wipro Ltd.' },
+  'HCLTECH.NS': { isin: 'INE860A01027', name: 'HCL Technologies Ltd.' },
+  'ASIANPAINT.NS': { isin: 'INE021A01026', name: 'Asian Paints Ltd.' },
+  'ADANIENT.NS': { isin: 'INE423A01024', name: 'Adani Enterprises Ltd.' },
+  'ADANIPORTS.NS': { isin: 'INE742F01042', name: 'Adani Ports & SEZ' },
+  'NTPC.NS': { isin: 'INE733E01010', name: 'NTPC Ltd.' },
+  'POWERGRID.NS': { isin: 'INE752E01010', name: 'Power Grid Corporation' },
+  'ONGC.NS': { isin: 'INE213A01029', name: 'Oil & Natural Gas Corp' },
+  'COALINDIA.NS': { isin: 'INE522F01014', name: 'Coal India Ltd.' },
+  'TATASTEEL.NS': { isin: 'INE081A01020', name: 'Tata Steel Ltd.' }
+};
+
+// In-memory cache for dynamic ISIN resolution
+const isinCache = new Map();
+
+/**
+ * Resolve instrument key for Upstox (Indices or Equities)
+ */
+async function resolveUpstoxInstrument(symbol) {
+  if (UPSTOX_INDEX_MAP[symbol]) {
+    return {
+      instrumentKey: UPSTOX_INDEX_MAP[symbol].key,
+      shortName: UPSTOX_INDEX_MAP[symbol].name
+    };
+  }
+
+  if (POPULAR_EQUITY_ISIN[symbol]) {
+    return {
+      instrumentKey: `NSE_EQ|${POPULAR_EQUITY_ISIN[symbol].isin}`,
+      shortName: POPULAR_EQUITY_ISIN[symbol].name
+    };
+  }
+
+  if (isinCache.has(symbol)) {
+    return isinCache.get(symbol);
+  }
+
+  // Dynamic lookup via Groww entity search
+  try {
+    const cleanSym = symbol.replace('.NS', '').replace('^', '').trim();
+    const url = `https://groww.in/v1/api/search/v1/entity?app=false&entity_type=stocks&page=0&q=${encodeURIComponent(cleanSym)}&size=1`;
+    const res = await fetch(url, { headers: { 'User-Agent': getRandomUserAgent() } });
+    if (res.ok) {
+      const data = await res.json();
+      const first = data.content?.[0];
+      if (first && first.isin) {
+        const item = {
+          instrumentKey: `NSE_EQ|${first.isin}`,
+          shortName: first.company_name || first.title || symbol
+        };
+        isinCache.set(symbol, item);
+        return item;
+      }
+    }
+  } catch (e) { }
+
+  return null;
+}
+
+/**
+ * Primary Historical Data Provider: Upstox Public v2 Candle API
+ * 100% Free, NO API key required, Authentic official NSE/BSE candles
+ */
+async function fetchUpstoxHistorical(symbol) {
+  const resolved = await resolveUpstoxInstrument(symbol);
+  if (!resolved || !resolved.instrumentKey) {
+    throw new Error(`Could not resolve Upstox instrument key for ${symbol}`);
+  }
+
+  const toDate = new Date().toISOString().split('T')[0];
+  const fromDate = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+  const url = `https://api.upstox.com/v2/historical-candle/${encodeURIComponent(resolved.instrumentKey)}/day/${toDate}/${fromDate}`;
+
+  const res = await fetch(url, {
+    headers: {
+      'Accept': 'application/json',
+      'User-Agent': getRandomUserAgent()
+    }
+  });
+
+  if (!res.ok) {
+    throw new Error(`Upstox returned HTTP ${res.status}`);
+  }
+
+  const json = await res.json();
+  const rawCandles = json.data?.candles || [];
+  if (rawCandles.length === 0) {
+    throw new Error(`No historical candles found in Upstox for ${symbol}`);
+  }
+
+  // Upstox returns newest first; sort oldest-to-newest for technical indicators
+  const sorted = rawCandles.slice().reverse();
+  const bars = [];
+  for (const c of sorted) {
+    const d = new Date(c[0]);
+    bars.push({
+      date: c[0].split('T')[0],
+      time: Math.floor(d.getTime() / 1000),
+      open: Number(Number(c[1]).toFixed(2)),
+      high: Number(Number(c[2]).toFixed(2)),
+      low: Number(Number(c[3]).toFixed(2)),
+      close: Number(Number(c[4]).toFixed(2)),
+      volume: Number(c[5]) || 0
+    });
+  }
+
+  const lastBar = bars[bars.length - 1];
+  const prevBar = bars.length > 1 ? bars[bars.length - 2] : lastBar;
+  const currentPrice = lastBar.close;
+  const change = Number((currentPrice - prevBar.close).toFixed(2));
+  const changePercent = Number(((change / (prevBar.close || 1)) * 100).toFixed(2));
+
+  return {
+    symbol,
+    shortName: resolved.shortName,
+    regularMarketPrice: currentPrice,
+    regularMarketChange: change,
+    regularMarketChangePercent: changePercent,
+    regularMarketDayHigh: lastBar.high,
+    regularMarketDayLow: lastBar.low,
+    regularMarketVolume: lastBar.volume,
+    marketState: 'REGULAR',
+    currency: 'INR',
+    bars
+  };
 }
 
 /**
@@ -277,20 +440,28 @@ async function fetchRawMarketData(symbol) {
 
   let payload = null;
 
-  // 1. Try Direct Yahoo Fetch with Cookie + Crumb
+  // 1. PRIMARY: Fetch from Upstox Public v2 Candle API (Authentic official exchange feed)
   try {
-    payload = await fetchDirectChart(normalized);
-  } catch (err) {
-    // If symbol had .NS and failed, try raw symbol without suffix
-    if (normalized.endsWith('.NS') && normalized !== '^NSEI') {
-      const altSymbol = normalized.replace('.NS', '');
-      try {
-        payload = await fetchDirectChart(altSymbol);
-      } catch (e2) {}
+    payload = await fetchUpstoxHistorical(normalized);
+  } catch (errUpstox) {
+    console.warn(`Upstox fetch warning for ${normalized}: ${errUpstox.message}. Trying secondary sources...`);
+  }
+
+  // 2. SECONDARY: Try Direct Yahoo Fetch if Upstox was not available
+  if (!payload || !payload.bars || payload.bars.length === 0) {
+    try {
+      payload = await fetchDirectChart(normalized);
+    } catch (err) {
+      if (normalized.endsWith('.NS') && normalized !== '^NSEI') {
+        const altSymbol = normalized.replace('.NS', '');
+        try {
+          payload = await fetchDirectChart(altSymbol);
+        } catch (e2) { }
+      }
     }
   }
 
-  // 2. If Direct Yahoo Fetch Succeeded: Save to In-Memory & MongoDB Cache
+  // 3. If either Upstox or Yahoo Succeeded: Enhance with live Groww NSE quote & Save to Caches
   if (payload && payload.bars && payload.bars.length > 0) {
     // Optionally enhance with live Groww NSE quote if available
     if (normalized.endsWith('.NS')) {
@@ -313,7 +484,7 @@ async function fetchRawMarketData(symbol) {
 
     cache.set(cacheKey, { timestamp: Date.now(), data: payload });
     // Asynchronously update MongoDB cache
-    setCachedMarketData(normalized, payload).catch(() => {});
+    setCachedMarketData(normalized, payload).catch(() => { });
     return payload;
   }
 
@@ -548,6 +719,59 @@ async function analyzeAsset(symbol) {
  */
 async function searchSymbols(query) {
   if (!query || query.trim().length === 0) return [];
+  const cleanQuery = query.trim().toLowerCase();
+
+  // Benchmark index search matches
+  const indexMatches = [
+    { symbol: '^NSEI', name: 'Nifty 50 Index', exchange: 'NSE', type: 'INDEX' },
+    { symbol: '^BSESN', name: 'BSE Sensex Index', exchange: 'BSE', type: 'INDEX' },
+    { symbol: '^NSEBANK', name: 'Bank Nifty Index', exchange: 'NSE', type: 'INDEX' },
+    { symbol: 'NIFTY_FIN_SERVICE.NS', name: 'Nifty Financial Services', exchange: 'NSE', type: 'INDEX' }
+  ].filter(idx =>
+    idx.name.toLowerCase().includes(cleanQuery) ||
+    idx.symbol.toLowerCase().includes(cleanQuery)
+  );
+
+  // 1. Primary: Groww Entity Search (Ultra fast, full Indian equity & index coverage)
+  try {
+    const url = `https://groww.in/v1/api/search/v1/entity?app=false&entity_type=stocks&page=0&q=${encodeURIComponent(query)}&size=8`;
+    const res = await fetch(url, {
+      headers: {
+        'User-Agent': getRandomUserAgent(),
+        'Accept': 'application/json'
+      }
+    });
+
+    if (res.ok) {
+      const data = await res.json();
+      const items = (data.content || []).map(c => {
+        const scrip = c.nse_scrip_code || c.bse_scrip_code || c.search_id;
+        const sym = scrip.toUpperCase().endsWith('.NS') ? scrip.toUpperCase() : `${scrip.toUpperCase()}.NS`;
+        return {
+          symbol: sym,
+          name: c.company_name || c.title || c.name || scrip,
+          exchange: 'NSE',
+          type: 'EQUITY'
+        };
+      });
+
+      const combined = [...indexMatches, ...items];
+      const seen = new Set();
+      const deduplicated = combined.filter(item => {
+        if (seen.has(item.symbol)) return false;
+        seen.add(item.symbol);
+        return true;
+      });
+
+      if (deduplicated.length > 0) {
+        return deduplicated.slice(0, 8);
+      }
+    }
+  } catch (err) {
+    // try fallback search
+  }
+
+  // 2. Secondary: Yahoo Finance Search
   const { cookie } = await getYahooSession();
   const hosts = ['query2.finance.yahoo.com', 'query1.finance.yahoo.com'];
 
@@ -580,7 +804,7 @@ async function searchSymbols(query) {
     }
   }
 
-  // Fallback popular symbols if search is throttled
+  // 3. Fallback popular symbols
   const popular = [
     { symbol: '^NSEI', name: 'Nifty 50 Index', exchange: 'NSE', type: 'INDEX' },
     { symbol: '^BSESN', name: 'BSE Sensex Index', exchange: 'BSE', type: 'INDEX' },
