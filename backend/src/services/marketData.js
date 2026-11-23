@@ -171,10 +171,28 @@ const isinCache = new Map();
  * Resolve instrument key for Upstox (Indices or Equities)
  */
 async function resolveUpstoxInstrument(symbol) {
+  if (!symbol) return null;
+  const upper = symbol.toUpperCase().trim();
+  const normalized = normalizeSymbol(symbol);
+
   if (UPSTOX_INDEX_MAP[symbol]) {
     return {
       instrumentKey: UPSTOX_INDEX_MAP[symbol].key,
       shortName: UPSTOX_INDEX_MAP[symbol].name
+    };
+  }
+
+  if (UPSTOX_INDEX_MAP[upper]) {
+    return {
+      instrumentKey: UPSTOX_INDEX_MAP[upper].key,
+      shortName: UPSTOX_INDEX_MAP[upper].name
+    };
+  }
+
+  if (UPSTOX_INDEX_MAP[normalized]) {
+    return {
+      instrumentKey: UPSTOX_INDEX_MAP[normalized].key,
+      shortName: UPSTOX_INDEX_MAP[normalized].name
     };
   }
 
@@ -183,6 +201,17 @@ async function resolveUpstoxInstrument(symbol) {
       instrumentKey: `NSE_EQ|${POPULAR_EQUITY_ISIN[symbol].isin}`,
       shortName: POPULAR_EQUITY_ISIN[symbol].name
     };
+  }
+
+  if (POPULAR_EQUITY_ISIN[normalized]) {
+    return {
+      instrumentKey: `NSE_EQ|${POPULAR_EQUITY_ISIN[normalized].isin}`,
+      shortName: POPULAR_EQUITY_ISIN[normalized].name
+    };
+  }
+
+  if (isinCache.has(normalized)) {
+    return isinCache.get(normalized);
   }
 
   if (isinCache.has(symbol)) {
@@ -203,6 +232,7 @@ async function resolveUpstoxInstrument(symbol) {
           shortName: first.company_name || first.title || symbol
         };
         isinCache.set(symbol, item);
+        isinCache.set(normalized, item);
         return item;
       }
     }
@@ -260,19 +290,87 @@ async function fetchUpstoxHistorical(symbol) {
 
   const lastBar = bars[bars.length - 1];
   const prevBar = bars.length > 1 ? bars[bars.length - 2] : lastBar;
-  const currentPrice = lastBar.close;
-  const change = Number((currentPrice - prevBar.close).toFixed(2));
-  const changePercent = Number(((change / (prevBar.close || 1)) * 100).toFixed(2));
+
+  let livePrice = lastBar.close;
+  let prevClose = prevBar.close;
+  let dayHigh = lastBar.high;
+  let dayLow = lastBar.low;
+  let dayVolume = lastBar.volume;
+
+  // Seamlessly merge today's live intraday candles (provides real-time LTP, High, Low during market hours)
+  try {
+    const intradayUrl = `https://api.upstox.com/v2/historical-candle/intraday/${encodeURIComponent(resolved.instrumentKey)}/1minute`;
+    const intradayRes = await fetch(intradayUrl, {
+      headers: {
+        'Accept': 'application/json',
+        'User-Agent': getRandomUserAgent()
+      }
+    });
+
+    if (intradayRes.ok) {
+      const intradayJson = await intradayRes.json();
+      const intradayCandles = intradayJson.data?.candles || [];
+      if (intradayCandles.length > 0) {
+        const latestMinute = intradayCandles[0];
+        const latestDateStr = latestMinute[0].split('T')[0];
+        const lastDailyDateStr = lastBar.date;
+
+        livePrice = Number(Number(latestMinute[4]).toFixed(2));
+
+        let todayHigh = -Infinity;
+        let todayLow = Infinity;
+        let todayVol = 0;
+        for (const c of intradayCandles) {
+          if (c[2] > todayHigh) todayHigh = Number(c[2]);
+          if (c[3] < todayLow) todayLow = Number(c[3]);
+          todayVol += (Number(c[5]) || 0);
+        }
+        dayHigh = Number(todayHigh.toFixed(2));
+        dayLow = Number(todayLow.toFixed(2));
+        dayVolume = todayVol;
+
+        const firstMinute = intradayCandles[intradayCandles.length - 1];
+        const todayOpen = Number(Number(firstMinute[1]).toFixed(2));
+
+        if (latestDateStr !== lastDailyDateStr) {
+          // It's a new trading day not yet finalized in daily candles:
+          // The previous daily close is lastBar.close
+          prevClose = lastBar.close;
+          bars.push({
+            date: latestDateStr,
+            time: Math.floor(new Date(latestMinute[0]).getTime() / 1000),
+            open: todayOpen,
+            high: dayHigh,
+            low: dayLow,
+            close: livePrice,
+            volume: todayVol
+          });
+        } else {
+          // Today's candle is already in bars; update it with latest intraday values
+          lastBar.high = Math.max(lastBar.high, dayHigh);
+          lastBar.low = Math.min(lastBar.low, dayLow);
+          lastBar.close = livePrice;
+          lastBar.volume = todayVol;
+          prevClose = prevBar.close;
+        }
+      }
+    }
+  } catch (errIntraday) {
+    console.warn(`Upstox intraday fetch note for ${symbol}: ${errIntraday.message}`);
+  }
+
+  const change = Number((livePrice - prevClose).toFixed(2));
+  const changePercent = Number(((change / (prevClose || 1)) * 100).toFixed(2));
 
   return {
     symbol,
     shortName: resolved.shortName,
-    regularMarketPrice: currentPrice,
+    regularMarketPrice: livePrice,
     regularMarketChange: change,
     regularMarketChangePercent: changePercent,
-    regularMarketDayHigh: lastBar.high,
-    regularMarketDayLow: lastBar.low,
-    regularMarketVolume: lastBar.volume,
+    regularMarketDayHigh: dayHigh,
+    regularMarketDayLow: dayLow,
+    regularMarketVolume: dayVolume,
     marketState: 'REGULAR',
     currency: 'INR',
     bars
@@ -563,57 +661,50 @@ function generateSyntheticFallback(symbol) {
     basePrice = 1500.00;
   }
 
-  const bars = [];
-  let price = basePrice;
   const now = new Date();
-
+  const tradingDates = [];
   for (let i = 180; i >= 0; i--) {
     const d = new Date(now.getTime() - i * 24 * 60 * 60 * 1000);
     const dayOfWeek = d.getDay();
     if (dayOfWeek === 0 || dayOfWeek === 6) continue;
+    tradingDates.push(d);
+  }
 
-    const changePercent = (Math.sin(i / 5) * 0.008) + ((Math.random() - 0.48) * 0.012);
-    const open = price;
-    price = price * (1 + changePercent);
-    const high = Math.max(open, price) * (1 + Math.random() * 0.005);
-    const low = Math.min(open, price) * (1 - Math.random() * 0.005);
-    const close = price;
+  // Work backwards from basePrice so the current bar is GUARANTEED to match basePrice
+  let currentClose = basePrice;
+  const tempBars = [];
+  for (let idx = tradingDates.length - 1; idx >= 0; idx--) {
+    const d = tradingDates[idx];
+    const isToday = idx === tradingDates.length - 1;
+    const dailyReturn = isToday ? 0.0035 : (Math.sin(idx / 5) * 0.007 + (Math.random() - 0.49) * 0.01);
+    const open = isToday ? Number((currentClose * 0.998).toFixed(2)) : Number((currentClose / (1 + dailyReturn * 0.3)).toFixed(2));
+    const close = Number(currentClose.toFixed(2));
+    const high = Number((Math.max(open, close) * (1 + 0.003 + Math.random() * 0.004)).toFixed(2));
+    const low = Number((Math.min(open, close) * (1 - 0.003 - Math.random() * 0.004)).toFixed(2));
     const vol = Math.floor(1500000 + Math.random() * 1000000);
 
-    bars.push({
+    tempBars.unshift({
       date: d.toISOString().split('T')[0],
       time: Math.floor(d.getTime() / 1000),
-      open: Number(open.toFixed(2)),
-      high: Number(high.toFixed(2)),
-      low: Number(low.toFixed(2)),
-      close: Number(close.toFixed(2)),
+      open,
+      high,
+      low,
+      close,
       volume: vol
     });
+
+    currentClose = currentClose / (1 + dailyReturn);
   }
 
-  // Mathematically scale the series so the LAST bar closes EXACTLY at basePrice
-  const rawLastClose = bars[bars.length - 1].close || basePrice;
-  const scale = basePrice / rawLastClose;
-  for (const bar of bars) {
-    bar.open = Number((bar.open * scale).toFixed(2));
-    bar.high = Number((bar.high * scale).toFixed(2));
-    bar.low = Number((bar.low * scale).toFixed(2));
-    bar.close = Number((bar.close * scale).toFixed(2));
-  }
-  // Pin final bar to exact basePrice
-  const lastBar = bars[bars.length - 1];
-  lastBar.close = basePrice;
-  lastBar.high = Math.max(lastBar.high, basePrice);
-  lastBar.low = Math.min(lastBar.low, basePrice * 0.995);
-
-  const prevBar = bars.length > 1 ? bars[bars.length - 2] : lastBar;
+  const lastBar = tempBars[tempBars.length - 1];
+  const prevBar = tempBars.length > 1 ? tempBars[tempBars.length - 2] : lastBar;
   const change = Number((lastBar.close - prevBar.close).toFixed(2));
   const changePercent = Number(((change / prevBar.close) * 100).toFixed(2));
 
   return {
     symbol,
     shortName: name,
-    regularMarketPrice: basePrice,
+    regularMarketPrice: lastBar.close,
     regularMarketChange: change,
     regularMarketChangePercent: changePercent,
     regularMarketDayHigh: lastBar.high,
@@ -621,7 +712,7 @@ function generateSyntheticFallback(symbol) {
     regularMarketVolume: lastBar.volume,
     marketState: 'REGULAR',
     currency: 'INR',
-    bars
+    bars: tempBars
   };
 }
 
